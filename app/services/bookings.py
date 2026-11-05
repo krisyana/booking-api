@@ -47,6 +47,11 @@ def counts_toward_capacity(now: datetime):
     )
 
 
+def hold_owns_seats(booking: Booking, now: datetime) -> bool:
+    """The unpaid half of `counts_toward_capacity`, for a booking already loaded."""
+    return booking.status == BookingStatus.PENDING and booking.hold_expires_at > now
+
+
 async def lock_slot(session: AsyncSession, slot_id: uuid.UUID) -> Slot | None:
     return await session.scalar(select(Slot).where(Slot.id == slot_id).with_for_update())
 

@@ -5,7 +5,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.background import run_periodically
-from app.config import DEV_TOKEN_SECRET, DEV_WEBHOOK_SECRET, Settings, settings
+from app.config import (
+    DEV_TOKEN_SECRET,
+    DEV_WEBHOOK_SECRET,
+    EXAMPLE_TOKEN_SECRET,
+    EXAMPLE_WEBHOOK_SECRET,
+    Settings,
+    settings,
+)
 from app.integrations.notifications import get_notifier
 from app.integrations.payments import get_payment_provider
 from app.security import booking_token, verify_booking_token
@@ -21,6 +28,7 @@ def test_booking_tokens_are_stable_and_tied_to_one_booking_and_secret():
     assert not verify_booking_token(b, booking_token(a, "s"), "s")
     assert not verify_booking_token(a, None, "s")
     assert not verify_booking_token(a, "", "s")
+    assert not verify_booking_token(a, "é" + booking_token(a, "s")[1:], "s")
 
 
 def test_production_refuses_the_development_secrets():
@@ -28,6 +36,19 @@ def test_production_refuses_the_development_secrets():
         Settings(environment="production")
     with pytest.raises(ValidationError, match="TOKEN_SECRET"):
         Settings(environment="production", webhook_secret="x" * 32)
+
+
+def test_production_refuses_the_env_example_secrets():
+    with pytest.raises(ValidationError, match="WEBHOOK_SECRET.*TOKEN_SECRET"):
+        Settings(
+            environment="production",
+            webhook_secret=EXAMPLE_WEBHOOK_SECRET,
+            token_secret=EXAMPLE_TOKEN_SECRET,
+        )
+    with pytest.raises(ValidationError, match="TOKEN_SECRET"):
+        Settings(environment="production", webhook_secret="x" * 32, token_secret="change-me-too")
+    with pytest.raises(ValidationError, match="WEBHOOK_SECRET"):
+        Settings(environment="production", webhook_secret="change-me", token_secret="y" * 32)
 
 
 def test_production_accepts_real_secrets_and_development_keeps_defaults():

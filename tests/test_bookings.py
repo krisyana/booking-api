@@ -114,6 +114,16 @@ async def test_a_booking_can_only_be_read_with_its_own_token(client, booking_pay
     assert (await client.get(f"/bookings/{mine['id']}", headers=token(other))).status_code == 404
 
 
+async def test_a_non_ascii_token_is_a_wrong_token_not_a_server_error(client, booking_payload):
+    slot_id = await seed_slot()
+    booking = await book(client, slot_id, booking_payload)
+    headers = {"X-Booking-Token": "é".encode()}
+
+    assert (await client.get(f"/bookings/{booking['id']}", headers=headers)).status_code == 404
+    unknown = "00000000-0000-0000-0000-000000000000"
+    assert (await client.get(f"/bookings/{unknown}", headers=headers)).status_code == 404
+
+
 async def test_a_booking_cannot_be_cancelled_without_its_token(client, booking_payload):
     slot_id = await seed_slot()
     booking = await book(client, slot_id, booking_payload)

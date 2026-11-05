@@ -5,6 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_WEBHOOK_SECRET = "dev-webhook-secret"
 DEV_TOKEN_SECRET = "dev-token-secret"
+# The placeholders shipped in .env.example are public too.
+EXAMPLE_WEBHOOK_SECRET = "change-me"
+EXAMPLE_TOKEN_SECRET = "change-me-too"
 
 
 class Settings(BaseSettings):
@@ -37,16 +40,20 @@ class Settings(BaseSettings):
         if self.environment == "production":
             weak = [
                 name
-                for name, value, default in (
-                    ("WEBHOOK_SECRET", self.webhook_secret, DEV_WEBHOOK_SECRET),
-                    ("TOKEN_SECRET", self.token_secret, DEV_TOKEN_SECRET),
+                for name, value, known in (
+                    (
+                        "WEBHOOK_SECRET",
+                        self.webhook_secret,
+                        (DEV_WEBHOOK_SECRET, EXAMPLE_WEBHOOK_SECRET),
+                    ),
+                    ("TOKEN_SECRET", self.token_secret, (DEV_TOKEN_SECRET, EXAMPLE_TOKEN_SECRET)),
                 )
-                if value == default
+                if value in known
             ]
             if weak:
                 raise ValueError(
-                    f"{', '.join(weak)} must be changed from the development default "
-                    "when ENVIRONMENT=production"
+                    f"{', '.join(weak)} must be changed from the development or .env.example "
+                    "default when ENVIRONMENT=production"
                 )
         return self
 

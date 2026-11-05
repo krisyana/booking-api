@@ -47,7 +47,8 @@ accepted 27 seats on a 10-seat slot).
 | Paid less than the total | `partial`: the hold stays, the rest can arrive later |
 | Paid more than the total | `confirmed`, the excess is `refund_due_idr` |
 | Paid again under a new event id | `overpaid`, all of it is `refund_due_idr` |
-| Paid after the hold lapsed, seat still free | `late_confirmed` |
+| Paid after the hold lapsed, covers the total, seat still free | `late_confirmed` |
+| Paid after the hold lapsed, less than the total | `refund_due`, booking is `expired`; later top-ups are refunded too |
 | Paid after the hold lapsed, seat taken | booking stays `expired`, everything paid is `refund_due_idr` |
 | Paid after the customer cancelled | `refund_due`, everything paid is `refund_due_idr` |
 | Provider reports a failed payment | pending booking is cancelled and its seats freed, unless money already arrived |

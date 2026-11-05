@@ -18,7 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Booking, BookingStatus, PaymentEvent, utcnow
-from app.services.bookings import lock_slot, seats_taken
+from app.services.bookings import hold_owns_seats, lock_slot, seats_taken
 from app.services.outbox import enqueue
 
 
@@ -28,7 +28,7 @@ class Outcome(StrEnum):
     LATE_CONFIRMED = "late_confirmed"  # hold had lapsed but the seats were still free
     PARTIAL = "partial"  # paid, but less than the total: waiting for the rest
     OVERPAID = "overpaid"  # booking was already paid; the extra is refund due
-    REFUND_DUE = "refund_due"  # paid, but the seats are gone or the booking was cancelled
+    REFUND_DUE = "refund_due"  # paid, but the hold lapsed short, the seats are gone, or cancelled
     FAILED = "failed"  # provider reported a failed payment
     UNKNOWN_BOOKING = "unknown_booking"
 
@@ -92,6 +92,8 @@ async def _decide(
             booking.status = BookingStatus.CANCELLED
         return Outcome.FAILED
 
+    # An expired booking that already holds money has been sent a refund_due, so it stays refunded.
+    refund_announced = booking.status == BookingStatus.EXPIRED and booking.paid_idr > 0
     booking.paid_idr += amount_idr  # money is always recorded, whatever happens next
 
     if booking.status == BookingStatus.CANCELLED:
@@ -104,28 +106,24 @@ async def _decide(
             return Outcome.OVERPAID
         return Outcome.CONFIRMED
 
-    if booking.paid_idr < booking.total_idr:
-        if booking.status == BookingStatus.EXPIRED:
-            # The hold is gone and the full price has not arrived: the customer is owed this back.
-            enqueue(session, "refund_due", booking)
-            return Outcome.REFUND_DUE
-        return Outcome.PARTIAL
-
-    hold_lapsed = booking.status == BookingStatus.EXPIRED or booking.hold_expires_at <= now
-    if hold_lapsed:
-        # Our hold no longer counts toward capacity, so check the seats are still free.
-        free = slot.capacity - await seats_taken(session, slot.id, now)
-        if booking.party_size > free or slot.starts_at <= now:
-            booking.status = BookingStatus.EXPIRED
-            enqueue(session, "refund_due", booking)
-            return Outcome.REFUND_DUE
+    if hold_owns_seats(booking, now):
+        if booking.paid_idr < booking.total_idr:
+            return Outcome.PARTIAL
         booking.status = BookingStatus.CONFIRMED
         _announce_confirmation(session, booking)
-        return Outcome.LATE_CONFIRMED
+        return Outcome.CONFIRMED
 
-    booking.status = BookingStatus.CONFIRMED
-    _announce_confirmation(session, booking)
-    return Outcome.CONFIRMED
+    # Our hold no longer counts toward capacity, so check the seats are still free.
+    if not refund_announced and booking.paid_idr >= booking.total_idr:
+        free = slot.capacity - await seats_taken(session, slot.id, now)
+        if booking.party_size <= free and slot.starts_at > now:
+            booking.status = BookingStatus.CONFIRMED
+            _announce_confirmation(session, booking)
+            return Outcome.LATE_CONFIRMED
+
+    booking.status = BookingStatus.EXPIRED
+    enqueue(session, "refund_due", booking)
+    return Outcome.REFUND_DUE
 
 
 def _announce_confirmation(session: AsyncSession, booking: Booking) -> None:

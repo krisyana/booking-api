@@ -34,4 +34,5 @@ def booking_token(booking_id: uuid.UUID, secret: str) -> str:
 
 
 def verify_booking_token(booking_id: uuid.UUID, token: str | None, secret: str) -> bool:
-    return hmac.compare_digest(booking_token(booking_id, secret), token or "")
+    expected = booking_token(booking_id, secret).encode()
+    return hmac.compare_digest(expected, (token or "").encode())

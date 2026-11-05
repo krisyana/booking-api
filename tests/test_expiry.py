@@ -160,3 +160,73 @@ async def test_a_partial_payment_on_an_expired_booking_is_refund_due():
 
     assert outcome == Outcome.REFUND_DUE
     assert await _outbox_kinds() == ["booking_held", "refund_due"]
+
+
+async def _pay(booking_id, event_id, amount_idr, now) -> Outcome:
+    async with SessionLocal() as session, session.begin():
+        return await apply_payment_event(
+            session,
+            event_id=event_id,
+            booking_id=booking_id,
+            status="paid",
+            amount_idr=amount_idr,
+            now=now,
+        )
+
+
+async def test_a_top_up_after_a_refund_was_announced_stays_refund_due():
+    slot_id = await seed_slot(capacity=1, price_idr=100_000)
+    start = utcnow()
+    booking = await _hold(slot_id, start)
+    after_lapse = start + timedelta(minutes=settings.hold_minutes + 1)
+    async with SessionLocal() as session, session.begin():
+        await expire_holds(session, now=after_lapse)
+
+    short = await _pay(booking.id, "evt_short", 30_000, after_lapse)
+    top_up = await _pay(booking.id, "evt_top_up", 70_000, after_lapse + timedelta(minutes=1))
+
+    assert (short, top_up) == (Outcome.REFUND_DUE, Outcome.REFUND_DUE)
+    async with SessionLocal() as session:
+        stored = await session.get(Booking, booking.id)
+        assert stored.status == BookingStatus.EXPIRED
+        assert (stored.paid_idr, stored.refund_due_idr) == (100_000, 100_000)
+    assert await _outbox_kinds() == ["booking_held", "refund_due", "refund_due"]
+
+
+async def test_a_short_payment_on_a_lapsed_hold_is_refund_due_before_expiry_runs():
+    slot_id = await seed_slot(capacity=1, price_idr=100_000)
+    start = utcnow()
+    booking = await _hold(slot_id, start)
+    after_lapse = start + timedelta(minutes=settings.hold_minutes + 1)
+
+    outcome = await _pay(booking.id, "evt_short_lapsed", 40_000, after_lapse)
+
+    assert outcome == Outcome.REFUND_DUE
+    async with SessionLocal() as session:
+        stored = await session.get(Booking, booking.id)
+        assert stored.status == BookingStatus.EXPIRED
+        assert stored.refund_due_idr == 40_000
+    assert await _outbox_kinds() == ["booking_held", "refund_due"]
+    # The seat was released, matching the outcome: someone else can take it.
+    other = await _hold(slot_id, after_lapse)
+    assert other.status == BookingStatus.PENDING
+    async with SessionLocal() as session, session.begin():
+        assert await expire_holds(session, now=after_lapse) == 0
+
+
+async def test_a_single_covering_payment_after_expiry_is_late_confirmed():
+    slot_id = await seed_slot(capacity=1, price_idr=100_000)
+    start = utcnow()
+    booking = await _hold(slot_id, start)
+    after_lapse = start + timedelta(minutes=settings.hold_minutes + 1)
+    async with SessionLocal() as session, session.begin():
+        await expire_holds(session, now=after_lapse)
+
+    outcome = await _pay(booking.id, "evt_full_late", 100_000, after_lapse + timedelta(minutes=1))
+
+    assert outcome == Outcome.LATE_CONFIRMED
+    async with SessionLocal() as session:
+        stored = await session.get(Booking, booking.id)
+        assert stored.status == BookingStatus.CONFIRMED
+        assert stored.refund_due_idr == 0
+    assert await _outbox_kinds() == ["booking_held", "booking_confirmed"]
