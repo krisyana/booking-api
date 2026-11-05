@@ -122,11 +122,8 @@ async def create_booking(
     return booking, True
 
 
-async def cancel_booking(
-    session: AsyncSession, booking_id: uuid.UUID, now: datetime | None = None
-) -> Booking:
+async def cancel_booking(session: AsyncSession, booking_id: uuid.UUID) -> Booking:
     """Cancel a booking and free its seats. Anything already paid becomes refund due."""
-    now = now or utcnow()
     booking = await session.get(Booking, booking_id)
     if booking is None:
         raise BookingNotFound
@@ -150,13 +147,21 @@ async def cancel_booking(
 async def expire_holds(session: AsyncSession, now: datetime | None = None) -> int:
     """Mark unpaid bookings whose hold has lapsed as expired. Returns how many.
 
-    Capacity checks already ignore lapsed holds, so this is housekeeping that keeps statuses
-    honest; it is safe to run at any time and from several processes at once.
+    Capacity checks already ignore lapsed holds, so this keeps statuses honest. It is safe to run
+    at any time and from several processes at once. A booking that was partly paid when its hold
+    ran out is owed money back, so its customer is told.
     """
     now = now or utcnow()
-    result = await session.execute(
-        update(Booking)
-        .where(Booking.status == BookingStatus.PENDING, Booking.hold_expires_at <= now)
-        .values(status=BookingStatus.EXPIRED)
-    )
-    return result.rowcount or 0
+    expired = (
+        await session.scalars(
+            update(Booking)
+            .where(Booking.status == BookingStatus.PENDING, Booking.hold_expires_at <= now)
+            .values(status=BookingStatus.EXPIRED)
+            .returning(Booking)
+            .execution_options(synchronize_session=False)
+        )
+    ).all()
+    for booking in expired:
+        if booking.paid_idr > 0:
+            enqueue(session, "refund_due", booking)
+    return len(expired)

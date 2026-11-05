@@ -62,3 +62,13 @@ async def test_a_failing_background_job_is_retried_not_abandoned():
         await task
 
     assert calls >= 3  # it kept running after the first run failed
+
+
+async def test_the_app_refuses_to_start_with_an_unimplemented_payment_provider(monkeypatch):
+    from app.main import app, lifespan
+
+    monkeypatch.setattr(settings, "payment_provider", "xendit")
+
+    with pytest.raises(NotImplementedError, match="xendit"):
+        async with lifespan(app):
+            pass

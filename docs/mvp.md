@@ -34,6 +34,9 @@ data model already work with it; swapping in the real thing touches one file.
   3. Verify the provider's own callback authentication. This project verifies an HMAC of the body;
      providers differ, so make `verify_webhook` pluggable per provider.
   4. Run the provider's sandbox through `tests/test_webhooks.py`-style cases (duplicates, late, partial).
+  5. Pass the booking id as the provider's idempotency key when creating a charge. `POST /bookings/{id}/pay`
+     currently calls the provider while holding the booking's row lock; that is fine for the fake, but a real
+     network call should happen outside the lock (create the charge, then lock and store its reference).
 - **Done when:** a sandbox payment confirms a booking end to end with no manual step.
 
 ### Notifications  (`app/integrations/notifications.py`)
@@ -53,7 +56,9 @@ data model already work with it; swapping in the real thing touches one file.
 
 | Item | Notes |
 | --- | --- |
-| Rate limiting | Booking creation per IP and per phone number; needs shared state (Redis) once there is more than one process |
+| Rate limiting | Booking creation is unauthenticated, so someone could hold every seat with fake numbers for the length of a hold. Needs a per-IP and per-phone limit (and a cap on pending holds per number per slot); shared state (Redis) once there is more than one process |
+| Data retention | Sent outbox messages (which contain phone numbers) are never purged; the console notifier also logs them |
+| List pagination | `GET /activities` and the slot roster return everything |
 | Operator and customer UI | A Next.js front end over this API |
 | Operator sign-up | Operators are created from the CLI today |
 | Refund execution | `refund_due_idr` says what is owed; sending the money back is manual |

@@ -10,6 +10,7 @@ from app.background import run_periodically
 from app.config import settings
 from app.db import SessionLocal
 from app.integrations.notifications import get_notifier
+from app.integrations.payments import get_payment_provider
 from app.routers import activities, bookings, webhooks
 from app.services.bookings import expire_holds
 from app.services.outbox import deliver_pending
@@ -19,7 +20,9 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    notifier = get_notifier()  # fails at startup if configured for an unimplemented notifier
+    # Misconfiguration should stop the app at startup, not surface on a customer's first payment.
+    get_payment_provider()
+    notifier = get_notifier()
 
     async def expire() -> None:
         async with SessionLocal() as session, session.begin():

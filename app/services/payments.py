@@ -105,6 +105,10 @@ async def _decide(
         return Outcome.CONFIRMED
 
     if booking.paid_idr < booking.total_idr:
+        if booking.status == BookingStatus.EXPIRED:
+            # The hold is gone and the full price has not arrived: the customer is owed this back.
+            enqueue(session, "refund_due", booking)
+            return Outcome.REFUND_DUE
         return Outcome.PARTIAL
 
     hold_lapsed = booking.status == BookingStatus.EXPIRED or booking.hold_expires_at <= now

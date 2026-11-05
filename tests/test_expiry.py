@@ -3,10 +3,11 @@
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import BookingStatus, utcnow
+from app.models import Booking, BookingStatus, OutboxMessage, utcnow
 from app.services.bookings import SlotFull, create_booking, expire_holds
 from app.services.payments import Outcome, apply_payment_event
 from tests.conftest import seed_slot
@@ -99,3 +100,63 @@ async def test_late_payment_needs_a_refund_if_the_seat_was_taken():
         stored = await session.get(Booking, first.id)
         assert stored.status == BookingStatus.EXPIRED
         assert stored.refund_due_idr == 100_000
+
+
+async def _outbox_kinds() -> list[str]:
+    async with SessionLocal() as session:
+        messages = await session.scalars(select(OutboxMessage).order_by(OutboxMessage.created_at))
+        return [m.kind for m in messages]
+
+
+async def test_expiring_a_partly_paid_booking_tells_the_customer_they_are_owed_money():
+    slot_id = await seed_slot(capacity=2, price_idr=100_000)
+    start = utcnow()
+    booking = await _hold(slot_id, start)
+    async with SessionLocal() as session, session.begin():
+        await apply_payment_event(
+            session,
+            event_id="evt_half",
+            booking_id=booking.id,
+            status="paid",
+            amount_idr=40_000,
+            now=start,
+        )
+
+    async with SessionLocal() as session, session.begin():
+        await expire_holds(session, now=start + timedelta(minutes=settings.hold_minutes + 1))
+
+    assert await _outbox_kinds() == ["booking_held", "refund_due"]
+    async with SessionLocal() as session:
+        assert (await session.get(Booking, booking.id)).refund_due_idr == 40_000
+
+
+async def test_expiring_an_unpaid_booking_sends_no_refund_message():
+    slot_id = await seed_slot()
+    start = utcnow()
+    await _hold(slot_id, start)
+
+    async with SessionLocal() as session, session.begin():
+        await expire_holds(session, now=start + timedelta(minutes=settings.hold_minutes + 1))
+
+    assert await _outbox_kinds() == ["booking_held"]
+
+
+async def test_a_partial_payment_on_an_expired_booking_is_refund_due():
+    slot_id = await seed_slot(price_idr=100_000)
+    start = utcnow()
+    booking = await _hold(slot_id, start)
+    async with SessionLocal() as session, session.begin():
+        await expire_holds(session, now=start + timedelta(minutes=settings.hold_minutes + 1))
+
+    async with SessionLocal() as session, session.begin():
+        outcome = await apply_payment_event(
+            session,
+            event_id="evt_after_expiry",
+            booking_id=booking.id,
+            status="paid",
+            amount_idr=30_000,
+            now=start + timedelta(minutes=settings.hold_minutes + 2),
+        )
+
+    assert outcome == Outcome.REFUND_DUE
+    assert await _outbox_kinds() == ["booking_held", "refund_due"]
