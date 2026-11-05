@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from app.db import SessionLocal
 from app.models import Booking, BookingStatus
-from tests.conftest import seed_slot
+from tests.conftest import book, seed_slot, token
 
 
 async def test_concurrent_bookings_never_exceed_capacity(client, booking_payload):
@@ -46,10 +46,10 @@ async def test_concurrent_groups_of_different_sizes_stay_within_capacity(client,
 
 async def test_cancel_and_book_racing_each_other_stays_consistent(client, booking_payload):
     slot_id = await seed_slot(capacity=1)
-    first = (await client.post(f"/slots/{slot_id}/bookings", json=booking_payload)).json()
+    first = await book(client, slot_id, booking_payload)
 
     results = await asyncio.gather(
-        client.post(f"/bookings/{first['id']}/cancel"),
+        client.post(f"/bookings/{first['id']}/cancel", headers=token(first)),
         *(client.post(f"/slots/{slot_id}/bookings", json=booking_payload) for _ in range(5)),
     )
 

@@ -1,6 +1,8 @@
+import base64
 import hashlib
 import hmac
 import secrets
+import uuid
 
 
 def hash_api_key(key: str) -> str:
@@ -19,3 +21,17 @@ def sign_webhook(body: bytes, secret: str) -> str:
 
 def verify_webhook(body: bytes, header: str | None, secret: str) -> bool:
     return hmac.compare_digest(sign_webhook(body, secret), header or "")
+
+
+def booking_token(booking_id: uuid.UUID, secret: str) -> str:
+    """Customer access token for one booking.
+
+    Derived from the booking id with an HMAC instead of stored, so a client that retries a
+    booking request (and never saw the first response) can be given the same token again.
+    """
+    digest = hmac.new(secret.encode(), str(booking_id).encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def verify_booking_token(booking_id: uuid.UUID, token: str | None, secret: str) -> bool:
+    return hmac.compare_digest(booking_token(booking_id, secret), token or "")

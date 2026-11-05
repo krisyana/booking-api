@@ -36,7 +36,7 @@ async def _clean_tables():
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE payment_events, bookings, slots, activities, operators "
+                "TRUNCATE outbox_messages, payment_events, bookings, slots, activities, operators "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -73,6 +73,18 @@ async def seed_slot(
         )
         session.add(slot)
     return slot.id
+
+
+async def book(client: AsyncClient, slot_id, payload: dict, **overrides) -> dict:
+    """Create a booking and return the response body (including its access_token)."""
+    response = await client.post(f"/slots/{slot_id}/bookings", json={**payload, **overrides})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def token(booking: dict) -> dict[str, str]:
+    """Headers a customer sends to read, cancel or pay for their booking."""
+    return {"X-Booking-Token": booking["access_token"]}
 
 
 @pytest.fixture

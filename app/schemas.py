@@ -47,7 +47,20 @@ class BookingOut(BaseModel):
     total_idr: int
     status: BookingStatus
     hold_expires_at: datetime
-    refund_due: bool
+    paid_idr: int
+    refund_due_idr: int
+
+
+class BookingCreated(BookingOut):
+    # Shown with the booking when it is created. Send it as X-Booking-Token to read or cancel it.
+    access_token: str
+
+
+class ChargeOut(BaseModel):
+    reference: str
+    payment_url: str
+    amount_idr: int  # what is still to be paid
+    expires_at: datetime
 
 
 class PaymentEventIn(BaseModel):

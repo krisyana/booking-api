@@ -1,7 +1,11 @@
+import asyncio
 from datetime import timedelta
 
-from app.models import utcnow
-from tests.conftest import make_operator, seed_slot
+from sqlalchemy import func, select
+
+from app.db import SessionLocal
+from app.models import Booking, utcnow
+from tests.conftest import book, make_operator, seed_slot, token
 
 
 async def test_booking_holds_seats_and_prices_the_party(client, booking_payload):
@@ -15,7 +19,9 @@ async def test_booking_holds_seats_and_prices_the_party(client, booking_payload)
     body = response.json()
     assert body["status"] == "pending"
     assert body["total_idr"] == 300_000
-    assert body["refund_due"] is False
+    assert body["paid_idr"] == 0
+    assert body["refund_due_idr"] == 0
+    assert body["access_token"]
 
 
 async def test_available_seats_drop_as_bookings_are_held(client, booking_payload):
@@ -35,7 +41,7 @@ async def test_available_seats_drop_as_bookings_are_held(client, booking_payload
     ).json()
     assert slot["seats_available"] == 6
 
-    await client.post(f"/slots/{slot['id']}/bookings", json={**booking_payload, "party_size": 4})
+    await book(client, slot["id"], booking_payload, party_size=4)
 
     listed = (await client.get(f"/activities/{activity['id']}/slots")).json()
     assert listed[0]["seats_available"] == 2
@@ -43,7 +49,7 @@ async def test_available_seats_drop_as_bookings_are_held(client, booking_payload
 
 async def test_booking_more_than_the_remaining_seats_is_rejected(client, booking_payload):
     slot_id = await seed_slot(capacity=3)
-    await client.post(f"/slots/{slot_id}/bookings", json={**booking_payload, "party_size": 2})
+    await book(client, slot_id, booking_payload, party_size=2)
 
     response = await client.post(
         f"/slots/{slot_id}/bookings", json={**booking_payload, "party_size": 2}
@@ -78,17 +84,111 @@ async def test_invalid_whatsapp_number_is_rejected(client, booking_payload):
 
 async def test_cancelling_frees_the_seats(client, booking_payload):
     slot_id = await seed_slot(capacity=1)
-    first = (await client.post(f"/slots/{slot_id}/bookings", json=booking_payload)).json()
+    first = await book(client, slot_id, booking_payload)
     assert (
         await client.post(f"/slots/{slot_id}/bookings", json=booking_payload)
     ).status_code == 409
 
-    cancelled = await client.post(f"/bookings/{first['id']}/cancel")
+    cancelled = await client.post(f"/bookings/{first['id']}/cancel", headers=token(first))
 
     assert cancelled.json()["status"] == "cancelled"
     assert (
         await client.post(f"/slots/{slot_id}/bookings", json=booking_payload)
     ).status_code == 201
+
+
+# --- who may see or change a booking -------------------------------------------------------
+
+
+async def test_a_booking_can_only_be_read_with_its_own_token(client, booking_payload):
+    slot_id = await seed_slot(capacity=5)
+    mine = await book(client, slot_id, booking_payload)
+    other = await book(client, slot_id, booking_payload, customer_name="Someone Else")
+
+    assert (await client.get(f"/bookings/{mine['id']}", headers=token(mine))).status_code == 200
+    assert (await client.get(f"/bookings/{mine['id']}")).status_code == 404
+    assert (
+        await client.get(f"/bookings/{mine['id']}", headers={"X-Booking-Token": "wrong"})
+    ).status_code == 404
+    # Another customer's valid token does not open my booking.
+    assert (await client.get(f"/bookings/{mine['id']}", headers=token(other))).status_code == 404
+
+
+async def test_a_booking_cannot_be_cancelled_without_its_token(client, booking_payload):
+    slot_id = await seed_slot()
+    booking = await book(client, slot_id, booking_payload)
+
+    assert (await client.post(f"/bookings/{booking['id']}/cancel")).status_code == 404
+
+    still = await client.get(f"/bookings/{booking['id']}", headers=token(booking))
+    assert still.json()["status"] == "pending"
+
+
+# --- retrying a booking request ------------------------------------------------------------
+
+
+async def test_repeating_a_request_with_the_same_idempotency_key_returns_the_same_booking(
+    client, booking_payload
+):
+    slot_id = await seed_slot(capacity=5)
+    headers = {"Idempotency-Key": "tap-1"}
+
+    first = await client.post(f"/slots/{slot_id}/bookings", json=booking_payload, headers=headers)
+    second = await client.post(f"/slots/{slot_id}/bookings", json=booking_payload, headers=headers)
+
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert first.json()["id"] == second.json()["id"]
+    # The retry must be able to get the token even though it never saw the first response.
+    assert first.json()["access_token"] == second.json()["access_token"]
+    async with SessionLocal() as session:
+        assert await session.scalar(select(func.count()).select_from(Booking)) == 1
+
+
+async def test_the_same_key_with_a_different_request_is_rejected(client, booking_payload):
+    slot_id = await seed_slot(capacity=5)
+    headers = {"Idempotency-Key": "tap-2"}
+    await client.post(f"/slots/{slot_id}/bookings", json=booking_payload, headers=headers)
+
+    response = await client.post(
+        f"/slots/{slot_id}/bookings", json={**booking_payload, "party_size": 3}, headers=headers
+    )
+
+    assert response.status_code == 422
+
+
+async def test_simultaneous_retries_with_one_key_create_one_booking(client, booking_payload):
+    slot_id = await seed_slot(capacity=5)
+
+    responses = await asyncio.gather(
+        *(
+            client.post(
+                f"/slots/{slot_id}/bookings",
+                json=booking_payload,
+                headers={"Idempotency-Key": "double-tap"},
+            )
+            for _ in range(10)
+        )
+    )
+
+    assert {r.status_code for r in responses} <= {200, 201}
+    assert len({r.json()["id"] for r in responses}) == 1
+    async with SessionLocal() as session:
+        assert await session.scalar(select(func.count()).select_from(Booking)) == 1
+
+
+async def test_an_idempotency_key_is_scoped_to_one_slot(client, booking_payload):
+    slot_a = await seed_slot()
+    slot_b = await seed_slot()
+    headers = {"Idempotency-Key": "same-key"}
+
+    a = await client.post(f"/slots/{slot_a}/bookings", json=booking_payload, headers=headers)
+    b = await client.post(f"/slots/{slot_b}/bookings", json=booking_payload, headers=headers)
+
+    assert (a.status_code, b.status_code) == (201, 201)
+    assert a.json()["id"] != b.json()["id"]
+
+
+# --- operators -----------------------------------------------------------------------------
 
 
 async def test_operator_endpoints_need_a_valid_api_key(client):
@@ -133,7 +233,7 @@ async def test_only_the_owner_can_see_a_slot_roster(client, booking_payload):
             headers=headers_a,
         )
     ).json()
-    await client.post(f"/slots/{slot['id']}/bookings", json=booking_payload)
+    await book(client, slot["id"], booking_payload)
 
     owner_view = await client.get(f"/slots/{slot['id']}/bookings", headers=headers_a)
     other_view = await client.get(f"/slots/{slot['id']}/bookings", headers={"X-API-Key": key_b})
