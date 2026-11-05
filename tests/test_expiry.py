@@ -14,7 +14,7 @@ from tests.conftest import seed_slot
 
 async def _hold(slot_id, now, party_size=1):
     async with SessionLocal() as session, session.begin():
-        return await create_booking(
+        booking, _ = await create_booking(
             session,
             slot_id=slot_id,
             customer_name="Ayu",
@@ -22,6 +22,7 @@ async def _hold(slot_id, now, party_size=1):
             party_size=party_size,
             now=now,
         )
+    return booking
 
 
 async def test_a_lapsed_hold_frees_its_seat_for_someone_else():
@@ -97,4 +98,4 @@ async def test_late_payment_needs_a_refund_if_the_seat_was_taken():
 
         stored = await session.get(Booking, first.id)
         assert stored.status == BookingStatus.EXPIRED
-        assert stored.refund_due is True
+        assert stored.refund_due_idr == 100_000

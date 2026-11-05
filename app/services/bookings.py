@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Booking, BookingStatus, Slot, utcnow
+from app.services.outbox import enqueue
 
 
 class SlotNotFound(Exception):
@@ -32,6 +33,10 @@ class SlotFull(Exception):
 
 class BookingNotFound(Exception):
     pass
+
+
+class IdempotencyKeyReused(Exception):
+    """The same Idempotency-Key was sent with a different request body."""
 
 
 def counts_toward_capacity(now: datetime):
@@ -62,13 +67,37 @@ async def create_booking(
     customer_name: str,
     customer_whatsapp: str,
     party_size: int,
+    idempotency_key: str | None = None,
     now: datetime | None = None,
-) -> Booking:
-    """Hold seats for an unpaid booking. Call inside a transaction."""
+) -> tuple[Booking, bool]:
+    """Hold seats for an unpaid booking. Call inside a transaction.
+
+    Returns (booking, created). With an `idempotency_key`, repeating the same request returns the
+    original booking (created=False) instead of holding seats twice, so a customer who double-taps
+    or retries after a timeout is not charged for two bookings.
+    """
     now = now or utcnow()
     slot = await lock_slot(session, slot_id)
     if slot is None:
         raise SlotNotFound
+
+    if idempotency_key is not None:
+        # The slot lock serialises concurrent retries, so this check cannot be raced.
+        existing = await session.scalar(
+            select(Booking).where(
+                Booking.slot_id == slot.id, Booking.idempotency_key == idempotency_key
+            )
+        )
+        if existing is not None:
+            same = (existing.customer_name, existing.customer_whatsapp, existing.party_size) == (
+                customer_name,
+                customer_whatsapp,
+                party_size,
+            )
+            if not same:
+                raise IdempotencyKeyReused
+            return existing, False
+
     if slot.starts_at <= now:
         raise SlotClosed
 
@@ -84,17 +113,19 @@ async def create_booking(
         total_idr=slot.price_idr * party_size,
         status=BookingStatus.PENDING,
         hold_expires_at=now + timedelta(minutes=settings.hold_minutes),
+        idempotency_key=idempotency_key,
         created_at=now,
     )
     session.add(booking)
     await session.flush()
-    return booking
+    enqueue(session, "booking_held", booking)
+    return booking, True
 
 
 async def cancel_booking(
     session: AsyncSession, booking_id: uuid.UUID, now: datetime | None = None
 ) -> Booking:
-    """Cancel a booking and free its seats. A paid booking is flagged for refund."""
+    """Cancel a booking and free its seats. Anything already paid becomes refund due."""
     now = now or utcnow()
     booking = await session.get(Booking, booking_id)
     if booking is None:
@@ -109,10 +140,10 @@ async def cancel_booking(
     )
     assert booking is not None
 
-    if booking.status == BookingStatus.CONFIRMED:
-        booking.refund_due = True
     if booking.status in (BookingStatus.PENDING, BookingStatus.CONFIRMED):
         booking.status = BookingStatus.CANCELLED
+        # A paid booking keeps its paid_idr, so refund_due_idr now equals everything received.
+        enqueue(session, "booking_cancelled", booking)
     return booking
 
 

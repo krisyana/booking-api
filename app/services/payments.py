@@ -3,6 +3,10 @@
 Payment providers retry webhooks and sometimes deliver them twice or out of order, so every
 event is recorded under its provider event id (primary key) before anything else happens. A
 repeated event hits the conflict and changes nothing.
+
+Money model: `Booking.paid_idr` is the running total of paid events, and a booking is confirmed
+once that total covers `total_idr`. That makes partial payments, top-ups and overpayments all
+explicit; `Booking.refund_due_idr` says how much has to go back to the customer.
 """
 
 import uuid
@@ -15,14 +19,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Booking, BookingStatus, PaymentEvent, utcnow
 from app.services.bookings import lock_slot, seats_taken
+from app.services.outbox import enqueue
 
 
 class Outcome(StrEnum):
     DUPLICATE = "duplicate"  # event id already processed, nothing changed
     CONFIRMED = "confirmed"
-    LATE_CONFIRMED = "late_confirmed"  # hold had lapsed but seats were still free
+    LATE_CONFIRMED = "late_confirmed"  # hold had lapsed but the seats were still free
+    PARTIAL = "partial"  # paid, but less than the total: waiting for the rest
+    OVERPAID = "overpaid"  # booking was already paid; the extra is refund due
     REFUND_DUE = "refund_due"  # paid, but the seats are gone or the booking was cancelled
-    AMOUNT_MISMATCH = "amount_mismatch"  # paid amount differs from the booking total
     FAILED = "failed"  # provider reported a failed payment
     UNKNOWN_BOOKING = "unknown_booking"
 
@@ -81,21 +87,25 @@ async def _decide(
     assert booking is not None and slot is not None
 
     if status != "paid":
-        if booking.status == BookingStatus.PENDING:
+        # A failed charge frees the seats unless some money already arrived for this booking.
+        if booking.status == BookingStatus.PENDING and booking.paid_idr == 0:
             booking.status = BookingStatus.CANCELLED
         return Outcome.FAILED
 
-    if amount_idr != booking.total_idr:
-        # Do not confirm on the wrong amount; a person needs to look at this one.
-        booking.refund_due = True
-        return Outcome.AMOUNT_MISMATCH
-
-    if booking.status == BookingStatus.CONFIRMED:
-        return Outcome.CONFIRMED  # paid twice under different event ids: already ours
+    booking.paid_idr += amount_idr  # money is always recorded, whatever happens next
 
     if booking.status == BookingStatus.CANCELLED:
-        booking.refund_due = True
+        enqueue(session, "refund_due", booking)
         return Outcome.REFUND_DUE
+
+    if booking.status == BookingStatus.CONFIRMED:
+        if booking.refund_due_idr:
+            enqueue(session, "refund_due", booking)
+            return Outcome.OVERPAID
+        return Outcome.CONFIRMED
+
+    if booking.paid_idr < booking.total_idr:
+        return Outcome.PARTIAL
 
     hold_lapsed = booking.status == BookingStatus.EXPIRED or booking.hold_expires_at <= now
     if hold_lapsed:
@@ -103,10 +113,18 @@ async def _decide(
         free = slot.capacity - await seats_taken(session, slot.id, now)
         if booking.party_size > free or slot.starts_at <= now:
             booking.status = BookingStatus.EXPIRED
-            booking.refund_due = True
+            enqueue(session, "refund_due", booking)
             return Outcome.REFUND_DUE
         booking.status = BookingStatus.CONFIRMED
+        _announce_confirmation(session, booking)
         return Outcome.LATE_CONFIRMED
 
     booking.status = BookingStatus.CONFIRMED
+    _announce_confirmation(session, booking)
     return Outcome.CONFIRMED
+
+
+def _announce_confirmation(session: AsyncSession, booking: Booking) -> None:
+    enqueue(session, "booking_confirmed", booking)
+    if booking.refund_due_idr:  # paid more than the total
+        enqueue(session, "refund_due", booking)
