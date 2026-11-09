@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fake payment</title><link rel="stylesheet" href="style.css"></head>
+<body><main>
+<div class="card"><h2>Test payment page</h2>
+<p class="muted">Development stand-in for the payment provider. No money moves.</p>
+<button id="pay">Pay now</button> <p id="msg"></p></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.getElementById('pay').onclick=async e=>{
+  e.target.disabled=true;
+  const r=await fetch('/fake-pay/'+encodeURIComponent(q.get('ref'))+'/confirm',{method:'POST'});
+  const b=await r.json().catch(()=>({}));
+  document.getElementById('msg').innerHTML=r.ok
+    ?'Payment result: <b>'+b.result+'</b>. <a href="/ui/#/booking/'+q.get('booking')+'">Back to your booking</a>'
+    :'<span class="err">Failed: '+(b.detail||r.status)+'</span>';
+};
+</script></main></body></html>

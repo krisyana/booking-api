@@ -3,15 +3,18 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.background import run_periodically
 from app.config import settings
 from app.db import SessionLocal
 from app.integrations.notifications import get_notifier
 from app.integrations.payments import get_payment_provider
-from app.routers import activities, bookings, webhooks
+from app.routers import activities, bookings, dev, webhooks
 from app.services.bookings import expire_holds
 from app.services.outbox import deliver_pending
 
@@ -59,8 +62,17 @@ app = FastAPI(
 app.include_router(activities.router)
 app.include_router(bookings.router)
 app.include_router(webhooks.router)
+if settings.payment_provider == "fake" and settings.environment == "development":
+    app.include_router(dev.router)  # stand-in payment page; never mounted in production
+
+app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")
 
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse("/ui/")
