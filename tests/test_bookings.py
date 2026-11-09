@@ -250,3 +250,17 @@ async def test_only_the_owner_can_see_a_slot_roster(client, booking_payload):
 
     assert len(owner_view.json()) == 1
     assert other_view.status_code == 404
+
+
+async def test_a_single_activity_can_be_fetched_and_unknown_is_404(client):
+    import uuid
+
+    from tests.conftest import make_operator
+
+    _, key = await make_operator()
+    created = await client.post(
+        "/activities", json={"name": "Surf lesson"}, headers={"X-API-Key": key}
+    )
+    found = await client.get(f"/activities/{created.json()['id']}")
+    assert found.status_code == 200 and found.json()["name"] == "Surf lesson"
+    assert (await client.get(f"/activities/{uuid.uuid4()}")).status_code == 404

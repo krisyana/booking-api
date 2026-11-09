@@ -84,6 +84,7 @@ deduplicate. Only a console notifier exists so far; see [docs/mvp.md](docs/mvp.m
 | --- | --- | --- | --- |
 | POST | `/activities` | operator key | create an activity |
 | GET | `/activities` | none | list activities |
+| GET | `/activities/{id}` | none | one activity |
 | POST | `/activities/{id}/slots` | operator key | add a time slot (capacity, price per person in IDR) |
 | GET | `/activities/{id}/slots` | none | upcoming slots with seats still open |
 | POST | `/slots/{id}/bookings` | none | hold seats; optional `Idempotency-Key`; returns the booking token |
@@ -108,7 +109,20 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-Try the whole flow:
+### Web UI
+
+The API serves a small dependency-free web UI (plain HTML/JS in `app/static/`, no build step).
+With the server running, open **http://127.0.0.1:8000/** (it must match `PUBLIC_BASE_URL`, because
+the browser keeps your booking tokens per origin and the payment page redirects back to it).
+
+1. Create an operator, an activity and a slot (the UI is for customers; operators use `/docs`).
+2. In the UI: pick an activity, pick a time, enter your details and hold the seats.
+3. On the booking page press **Pay now**. With `PAYMENT_PROVIDER=fake` this opens a test payment page
+   (`/fake-pay/...`, mounted only when `ENVIRONMENT=development`) that sends the same event a real
+   provider would. The booking turns `confirmed`; **Cancel booking** shows any refund due.
+4. **My bookings** lists the bookings made from this browser (tokens are stored in `localStorage`).
+
+Try the whole flow from the command line:
 
 ```bash
 uv run python -m app.cli create-operator "Canggu Surf School"   # prints an API key once

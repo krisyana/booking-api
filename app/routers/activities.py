@@ -25,6 +25,14 @@ async def list_activities(session: SessionDep):
     return list(result)
 
 
+@router.get("/{activity_id}", response_model=ActivityOut)
+async def get_activity(activity_id: uuid.UUID, session: SessionDep):
+    activity = await session.get(Activity, activity_id)
+    if activity is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "activity not found")
+    return activity
+
+
 @router.post("/{activity_id}/slots", response_model=SlotOut, status_code=status.HTTP_201_CREATED)
 async def create_slot(
     activity_id: uuid.UUID, body: SlotIn, operator: OperatorDep, session: SessionDep
